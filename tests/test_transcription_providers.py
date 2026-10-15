@@ -192,6 +192,7 @@ class TestTranscriptionProviders:
         from portal.transcription.providers import atlascloud
 
         assert atlascloud.MAX_POLL_ATTEMPTS * atlascloud.POLL_INTERVAL_SECONDS <= 12
+        assert atlascloud.TRANSCRIBE_DEADLINE_SECONDS <= 12
 
     async def test_atlascloud_times_out_when_the_prediction_never_finishes(self):
         from portal.transcription.providers.atlascloud import AtlasCloudProvider
@@ -206,6 +207,98 @@ class TestTranscriptionProviders:
             with pytest.raises(TimeoutError):
                 await _run_atlas(AtlasCloudProvider(), mock_client)
         assert mock_client.get.await_count == 3
+
+    @pytest.mark.parametrize(
+        "prediction",
+        [
+            {"id": "p", "status": "completed"},
+            {"id": "p", "status": "completed", "stt_result": {"text": 123}, "outputs": None},
+            {"id": "p", "status": "completed", "stt_result": {}, "outputs": []},
+            {"id": "p", "status": "completed", "outputs": [None]},
+        ],
+    )
+    async def test_atlascloud_malformed_completed_result_raises_on_submit_path(self, prediction):
+        from portal.transcription.providers.atlascloud import AtlasCloudError, AtlasCloudProvider
+
+        mock_client = _atlas_client(submit=_atlas_response(200, {"code": 200, "data": prediction}), polls=[])
+
+        with pytest.raises(AtlasCloudError, match="no valid transcript"):
+            await _run_atlas(AtlasCloudProvider(), mock_client)
+
+    @pytest.mark.parametrize(
+        "prediction",
+        [
+            {"id": "p", "status": "completed"},
+            {"id": "p", "status": "completed", "stt_result": {"text": 123}, "outputs": None},
+        ],
+    )
+    async def test_atlascloud_malformed_completed_result_raises_on_poll_path(self, prediction):
+        from portal.transcription.providers.atlascloud import AtlasCloudError, AtlasCloudProvider
+
+        mock_client = _atlas_client(
+            submit=_atlas_response(200, {"code": 200, "data": {"id": "p", "status": "processing"}}),
+            polls=[_atlas_response(200, {"code": 200, "data": prediction})],
+        )
+
+        with pytest.raises(AtlasCloudError, match="no valid transcript"):
+            await _run_atlas(AtlasCloudProvider(), mock_client)
+
+    async def test_atlascloud_deadline_covers_slow_http_responses(self):
+        import time
+
+        from portal.transcription.providers import atlascloud
+        from portal.transcription.providers.atlascloud import AtlasCloudProvider
+
+        processing = _atlas_response(200, {"code": 200, "data": {"id": "p", "status": "processing"}})
+
+        async def slow_get(*args, **kwargs):
+            await asyncio.sleep(0.2)
+            return processing
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(return_value=processing)
+        mock_client.get = AsyncMock(side_effect=slow_get)
+
+        # Real sleeps: each poll takes ~0.2s of HTTP time plus the poll interval, 12 attempts would take
+        # several seconds; the elapsed-time deadline must cut it off first.
+        with (
+            patch("portal.transcription.providers.atlascloud.get_http_client", return_value=mock_client),
+            patch.object(atlascloud, "TRANSCRIBE_DEADLINE_SECONDS", 0.5),
+            patch.object(atlascloud, "POLL_INTERVAL_SECONDS", 0.1),
+        ):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                await AtlasCloudProvider().process_chunk(
+                    b"\x00" * 3200, "en-US", "bytedance/seed-asr-2.0", ProviderConfig(api_key="fake")
+                )
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 1.5
+        assert mock_client.post.await_count == 1
+
+    async def test_atlascloud_deadline_covers_a_slow_submission(self):
+        import time
+
+        from portal.transcription.providers import atlascloud
+        from portal.transcription.providers.atlascloud import AtlasCloudProvider
+
+        async def slow_post(*args, **kwargs):
+            await asyncio.sleep(5)
+
+        mock_client = MagicMock()
+        mock_client.post = AsyncMock(side_effect=slow_post)
+
+        with (
+            patch("portal.transcription.providers.atlascloud.get_http_client", return_value=mock_client),
+            patch.object(atlascloud, "TRANSCRIBE_DEADLINE_SECONDS", 0.3),
+        ):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                await AtlasCloudProvider().process_chunk(
+                    b"\x00" * 3200, "en-US", "bytedance/seed-asr-2.0", ProviderConfig(api_key="fake")
+                )
+
+        assert time.monotonic() - started < 1.5
 
     async def test_atlascloud_missing_key_raises_without_a_request(self):
         from portal.transcription.providers.atlascloud import AtlasCloudError, AtlasCloudProvider

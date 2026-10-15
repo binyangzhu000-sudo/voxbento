@@ -21,6 +21,9 @@ ATLAS_API_BASE = "https://api.atlascloud.ai"
 # Live interpretation drops audio once a chunk takes ~9-12s, so a slow prediction must fail fast.
 MAX_POLL_ATTEMPTS = 12
 POLL_INTERVAL_SECONDS = 1.0
+# Wall-clock cap for submission + polling combined, HTTP waits included. The attempt count above only
+# bounds the number of sleeps; this is what actually keeps a chunk from stalling the live stream.
+TRANSCRIBE_DEADLINE_SECONDS = 12.0
 # Transient poll failures are retried inside the budget above; anything else is reported at once.
 RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 
@@ -74,7 +77,8 @@ def transcript_text(prediction: Mapping[str, object]) -> str:
     outputs = prediction.get("outputs")
     if isinstance(outputs, list) and outputs and isinstance(outputs[0], str):
         return outputs[0].strip()
-    return ""
+    # Neither supported shape holds transcript data: that is a broken response, not silence.
+    raise AtlasCloudError("Atlas Cloud completed prediction contained no valid transcript data")
 
 
 def _failed(prediction: Mapping[str, object]) -> AtlasCloudError:
@@ -95,6 +99,7 @@ class AtlasCloudProvider(TranscriptionProvider):
         Returns "" only when Atlas Cloud completed and heard no speech. Everything else that goes wrong
         raises, so the worker's consecutive-error handling reports it instead of treating it as silence.
         The generation request is submitted once (it is billed); only the poll requests are retried.
+        Submission and polling together must finish within TRANSCRIBE_DEADLINE_SECONDS, else TimeoutError.
         """
         del booth_state
         api_key = config.get_key()
@@ -113,6 +118,12 @@ class AtlasCloudProvider(TranscriptionProvider):
         headers = {"Authorization": f"Bearer {api_key}"}
         client = get_http_client()
 
+        async with asyncio.timeout(TRANSCRIBE_DEADLINE_SECONDS):
+            return await self._submit_and_poll(client, headers, payload)
+
+    async def _submit_and_poll(
+        self, client: httpx.AsyncClient, headers: dict[str, str], payload: dict[str, object]
+    ) -> str:
         response = await client.post(
             f"{ATLAS_API_BASE}/api/v1/model/generateAudio",
             headers=headers,
