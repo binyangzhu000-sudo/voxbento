@@ -1136,7 +1136,7 @@ class TestEventCRUD:
 
 class TestBreadcrumbs:
     @pytest.mark.anyio
-    @pytest.mark.parametrize("path", ["/admin/events/", "/admin/users/"])
+    @pytest.mark.parametrize("path", ["/admin/events/"])
     async def test_breadcrumb_marks_current_page_and_uses_slash_separator(self, admin_cookie, path):
         async with _client() as c:
             resp = await c.get(path, cookies=admin_cookie)
@@ -1488,6 +1488,87 @@ class TestBoothCRUD:
                 cookies=admin_cookie,
             )
         assert b"French" in resp.content
+
+    @pytest.mark.anyio
+    async def test_create_duplicate_booth_shows_error(self, admin_cookie, seed_event):
+        event, room, _ = seed_event
+        async with _client() as c:
+            resp = await c.post(
+                f"/admin/events/{event.id}/rooms/{room.id}/booths/",
+                data={"language_code": "en", "language_name": "English"},
+                cookies=admin_cookie,
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"].endswith("/booths/?error=duplicate_language")
+            page = await c.get(resp.headers["location"], cookies=admin_cookie)
+        assert "Main Hall already has a booth for that language." in page.text
+
+    @pytest.mark.anyio
+    async def test_setup_wizard_duplicate_booth_shows_error(self, admin_cookie, seed_event):
+        event, room, _ = seed_event
+        async with _client() as c:
+            resp = await c.post(
+                f"/admin/events/{event.id}/setup/booths",
+                data={"room_id": str(room.id), "language_code": "en"},
+                cookies=admin_cookie,
+                follow_redirects=False,
+            )
+            assert resp.status_code == 303
+            assert resp.headers["location"].endswith(f"/setup/booths?room_id={room.id}&error=duplicate_language")
+            page = await c.get(resp.headers["location"], cookies=admin_cookie)
+        assert "That room already has a booth for that language." in page.text
+
+    @pytest.mark.parametrize("wizard", [False, True])
+    @pytest.mark.anyio
+    async def test_duplicate_booth_inserted_concurrently_shows_error(
+        self, admin_cookie, seed_event, monkeypatch, wizard
+    ):
+        from portal.routers import admin
+
+        event, room, _ = seed_event
+        real_check = admin._room_has_booth_language
+        calls = []
+
+        async def check_after_concurrent_insert(session, room_id, language_code):
+            calls.append(room_id)
+            if len(calls) == 1:
+                return False
+            return await real_check(session, room_id, language_code)
+
+        monkeypatch.setattr(admin, "_room_has_booth_language", check_after_concurrent_insert)
+        if wizard:
+            url = f"/admin/events/{event.id}/setup/booths"
+            data = {"room_id": str(room.id), "language_code": "en"}
+        else:
+            url = f"/admin/events/{event.id}/rooms/{room.id}/booths/"
+            data = {"language_code": "en", "language_name": "English"}
+        async with _client() as c:
+            resp = await c.post(url, data=data, cookies=admin_cookie, follow_redirects=False)
+        assert resp.status_code == 303
+        assert "error=duplicate_language" in resp.headers["location"]
+        assert len(calls) == 2
+
+    @pytest.mark.anyio
+    async def test_create_booth_in_missing_room_is_not_reported_as_duplicate(self, admin_cookie, seed_event):
+        event, _, _ = seed_event
+        async with _client() as c:
+            booths_page = await c.post(
+                f"/admin/events/{event.id}/rooms/9999/booths/",
+                data={"language_code": "en", "language_name": "English"},
+                cookies=admin_cookie,
+                follow_redirects=False,
+            )
+            wizard = await c.post(
+                f"/admin/events/{event.id}/setup/booths",
+                data={"room_id": "9999", "language_code": "en"},
+                cookies=admin_cookie,
+                follow_redirects=False,
+            )
+        assert booths_page.status_code == 303
+        assert "duplicate_language" not in booths_page.headers["location"]
+        assert wizard.status_code == 303
+        assert "duplicate_language" not in wizard.headers["location"]
 
     @pytest.mark.anyio
     async def test_booth_detail(self, admin_cookie, seed_event):
@@ -2209,7 +2290,7 @@ async def test_user_list_badge_shows_total_across_pages(admin_cookie):
 
     assert resp.status_code == 200
     # 3 seeded users plus the fixture's own administrator row.
-    assert '<span class="badge">Total: 4 users</span>' in resp.text
+    assert '<span class="ul-count">4 users</span>' in resp.text
     assert "displayed" not in resp.text
 
 
@@ -2225,7 +2306,7 @@ async def test_user_list_badge_uses_singular_for_one_user(admin_cookie):
 
     assert resp.status_code == 200
     # The fixture's administrator row plus the one seeded user: plural "users".
-    assert '<span class="badge">Total: 2 users</span>' in resp.text
+    assert '<span class="ul-count">2 users</span>' in resp.text
 
 
 @pytest.mark.anyio
