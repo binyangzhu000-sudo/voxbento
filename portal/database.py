@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
 import sqlalchemy as sa
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -48,6 +48,7 @@ from portal.models import (
     generate_token,
     utc_now,
 )
+from portal.roles import EVENT_OWNER
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +173,7 @@ async def create_event(
         membership = EventMembership(
             event_id=ev.id,
             user_id=owner_user_id,
-            role="event_owner",
+            role=EVENT_OWNER,
         )
         session.add(membership)
         await session.flush()
@@ -759,6 +760,12 @@ async def count_open_hosting_requests(session: AsyncSession) -> int:
     return (await session.execute(stmt)).scalar_one()
 
 
+async def count_pending_developer_accounts(session: AsyncSession) -> int:
+    """Developer API applications waiting for an Admin to approve or reject them."""
+    stmt = select(func.count(DeveloperAccount.id)).where(DeveloperAccount.status == "pending")
+    return (await session.execute(stmt)).scalar_one()
+
+
 async def close_hosting_request(
     session: AsyncSession,
     hosting_request: HostingRequest,
@@ -1150,14 +1157,18 @@ async def get_api_keys_for_event(session: AsyncSession, event_id: int) -> list[E
 
 
 async def revoke_api_key(session: AsyncSession, key_id: int, event_id: int) -> bool:
-    stmt = select(EventAPIKey).where(EventAPIKey.id == key_id, EventAPIKey.event_id == event_id)
+    stmt = (
+        update(EventAPIKey)
+        .where(
+            EventAPIKey.id == key_id,
+            EventAPIKey.event_id == event_id,
+            EventAPIKey.active.is_(True),
+        )
+        .values(active=False)
+    )
     result = await session.execute(stmt)
-    key = result.scalar_one_or_none()
-    if key:
-        key.active = False
-        await session.flush()
-        return True
-    return False
+    await session.flush()
+    return result.rowcount == 1
 
 
 async def verify_api_key(session: AsyncSession, raw_key: str) -> EventAPIKey | None:

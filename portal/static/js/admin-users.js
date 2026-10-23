@@ -2,8 +2,9 @@
 // changed in place like Eventyay's admin users page. Without JavaScript each
 // switch is a plain form that posts and reloads.
 
+import { confirmBeforeSubmit, confirmChange } from './confirm-dialog.js';
+
 const live = document.querySelector('[data-users-live]');
-const dialog = document.querySelector('[data-users-confirm]');
 
 function announce(message, kind = 'success') {
   if (!live) return;
@@ -14,19 +15,6 @@ function announce(message, kind = 'success') {
   live.append(note);
   clearTimeout(announce.timer);
   announce.timer = setTimeout(() => note.remove(), 6000);
-}
-
-function confirmChange(message) {
-  if (!message) return Promise.resolve(true);
-  if (!dialog || typeof dialog.showModal !== 'function') return Promise.resolve(window.confirm(message));
-  dialog.querySelector('[data-confirm-text]').textContent = message;
-  // Escape closes the dialog without setting returnValue, so clear the previous answer.
-  dialog.returnValue = '';
-  return new Promise((resolve) => {
-    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), { once: true });
-    dialog.showModal();
-    dialog.querySelector('[data-confirm-ok]')?.focus();
-  });
 }
 
 function setSwitch(form, on) {
@@ -47,6 +35,24 @@ function syncHostingSwitch(row, isAdmin) {
     setSwitch(hosting, row.dataset.canHost === 'true');
     button.disabled = false;
     button.title = 'Hosting access';
+  }
+}
+
+function syncVerifiedTag(row, isVerified) {
+  let tag = row.querySelector('[data-unverified-tag]');
+  if (isVerified) {
+    if (tag) tag.remove();
+  } else {
+    if (!tag && !row.querySelector('.ul-tag--pending')) {
+      const email = row.querySelector('.ul-email');
+      if (email) {
+        tag = document.createElement('span');
+        tag.className = 'ul-tag';
+        tag.dataset.unverifiedTag = '';
+        tag.textContent = 'Email not verified';
+        email.after(tag);
+      }
+    }
   }
 }
 
@@ -74,6 +80,7 @@ async function onToggle(event) {
     if (form.dataset.field === 'hosting') row.dataset.canHost = String(turningOn);
     if (form.dataset.field === 'admin') syncHostingSwitch(row, turningOn);
     if (form.dataset.field === 'active') row.classList.toggle('is-deactivated', !turningOn);
+    if (form.dataset.field === 'verified') syncVerifiedTag(row, turningOn);
     announce(data.message);
   } catch (err) {
     setSwitch(form, !turningOn);
@@ -103,13 +110,4 @@ document.querySelectorAll('[data-open-dialog]').forEach((btn) => {
 });
 
 // User page buttons that need a second look (Make Admin, Deactivate, …).
-document.querySelectorAll('form[data-confirm-message]').forEach((form) => {
-  form.addEventListener('submit', async (event) => {
-    if (form.dataset.confirmed) return;
-    event.preventDefault();
-    if (await confirmChange(form.dataset.confirmMessage)) {
-      form.dataset.confirmed = '1';
-      form.requestSubmit();
-    }
-  });
-});
+confirmBeforeSubmit();
