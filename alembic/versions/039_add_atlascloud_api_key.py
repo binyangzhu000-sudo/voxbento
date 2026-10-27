@@ -3,8 +3,8 @@
 Widens booths.transcription_model (provider model ids such as bytedance/seed-asr-2.0 are 22
 characters, longer than the old 20) and adds the encrypted Atlas Cloud key to events.
 
-Revision ID: 030
-Revises: 029
+Revision ID: 039
+Revises: 038
 Create Date: 2026-09-08
 
 """
@@ -17,8 +17,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "030"
-down_revision: Union[str, Sequence[str], None] = "029"
+revision: str = "039"
+down_revision: Union[str, Sequence[str], None] = "038"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
